@@ -269,6 +269,9 @@ class MainActivity : ComponentActivity() {
             // Keep screen on
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             
+            // Adjust brightness based on time of day
+            adjustBrightnessForTimeOfDay()
+            
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 window.setDecorFitsSystemWindows(false)
                 window.insetsController?.let {
@@ -287,6 +290,21 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    // Add time-based brightness adjustment
+    private fun adjustBrightnessForTimeOfDay() {
+        val currentHour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+        val brightness = when (currentHour) {
+            in 6..8 -> 0.65f    // Early morning (6AM-8AM): moderate brightness
+            in 9..18 -> 0.9f    // Day time (9AM-6PM): high brightness
+            in 19..21 -> 0.65f  // Evening (7PM-9PM): moderate brightness
+            else -> 0.4f        // Night (10PM-5AM): low brightness
+        }
+        
+        val layoutParams = window.attributes
+        layoutParams.screenBrightness = brightness
+        window.attributes = layoutParams
     }
 
     // Estimate tokens as words * 1.3, trim oldest messages if over limit
@@ -507,6 +525,46 @@ class MainActivity : ComponentActivity() {
         return "[Time: $time | Date: $date]"
     }
 
+    // Create a composable for the clock display to reuse in both modes
+    @Composable
+    fun ClockDisplay(modifier: Modifier = Modifier) {
+        val infiniteTransition = rememberInfiniteTransition(label = "clock_transition")
+        val currentTime = remember { mutableStateOf("") }
+        val currentDate = remember { mutableStateOf("") }
+        val timeFormatter = remember { SimpleDateFormat("h:mm a", Locale.getDefault()) }
+        val dateFormatter = remember { SimpleDateFormat("EEEE, MMMM d", Locale.getDefault()) }
+        
+        LaunchedEffect(Unit) {
+            while(true) {
+                val now = Date()
+                currentTime.value = timeFormatter.format(now)
+                currentDate.value = dateFormatter.format(now)
+                delay(1000) // Update every second
+            }
+        }
+        
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = modifier
+        ) {
+            Text(
+                text = currentTime.value,
+                color = Color.White,
+                fontSize = 192.sp,  // 300% larger than before
+                fontWeight = FontWeight.Light,
+                textAlign = TextAlign.Center
+            )
+            
+            Text(
+                text = currentDate.value,
+                color = Color.White.copy(alpha = 0.9f),
+                fontSize = 32.sp,
+                fontWeight = FontWeight.Light,
+                textAlign = TextAlign.Center
+            )
+        }
+    }
+
     // Beautiful screensaver UI for Standard Mode idle state
     @Composable
     fun ScreensaverUI(onTap: () -> Unit) {
@@ -685,9 +743,18 @@ class MainActivity : ComponentActivity() {
                 Text("⚙️", fontSize = 32.sp)
             }
 
-            // Centered text
+            // Clock at the top
+            ClockDisplay(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(bottom = 150.dp)
+            )
+
+            // Centered text - moved below the clock
             Box(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(top = 350.dp), // Push further down to leave room for clock
                 contentAlignment = Alignment.Center
             ) {
                 Text(
@@ -791,32 +858,31 @@ class MainActivity : ComponentActivity() {
         BoxWithConstraints(
             modifier = Modifier.fillMaxSize()
         ) {
-            val sectionHeight = maxHeight / 3
-            // User caption (top third, scrollable)
+            val sectionHeight = maxHeight / 2 // Changed from /3 to /2 since we now have only 2 sections
+
+            // Background
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFF1A1A1A))
+            ) {}
+
+            // Clock at the top
+            ClockDisplay(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 24.dp)
+            )
+
+            // Removed user caption section - we no longer show user's speech
+
+            // Waveform (top half, below clock)
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(sectionHeight)
                     .align(Alignment.TopCenter)
-                    .background(Color.Transparent)
-                    .padding(top = 24.dp, bottom = 24.dp, end = 32.dp)
-            ) {
-                if (userMsgVisible) {
-                    AnimatedMessageText(
-                        message = userMessage,
-                        isUser = true,
-                        modifier = Modifier
-                            .align(Alignment.CenterEnd)
-                            .verticalScroll(rememberScrollState())
-                    )
-                }
-            }
-            // Waveform (middle third)
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(sectionHeight)
-                    .align(Alignment.Center)
+                    .padding(top = 150.dp) // Add padding to move below the clock
             ) {
                 waves.forEachIndexed { index, wave ->
                     WaveShape(
@@ -825,25 +891,27 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
-            // Luma caption (bottom third, scrollable)
+            
+            // Luma caption (bottom half)
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(sectionHeight)
                     .align(Alignment.BottomCenter)
                     .background(Color.Transparent)
-                    .padding(top = 24.dp, bottom = 24.dp, start = 32.dp)
+                    .padding(top = 24.dp, bottom = 24.dp, start = 32.dp, end = 32.dp)
             ) {
                 if (lumaMsgVisible) {
                     AnimatedMessageText(
                         message = lumaMessage,
                         isUser = false,
                         modifier = Modifier
-                            .align(Alignment.CenterStart)
+                            .align(Alignment.Center)
                             .verticalScroll(rememberScrollState())
                     )
                 }
             }
+            
             // Settings button (remains top right)
             IconButton(
                 onClick = { showSettings = true },
@@ -854,6 +922,7 @@ class MainActivity : ComponentActivity() {
             ) {
                 Text("⚙️", fontSize = 32.sp)
             }
+            
             // Settings dialog (unchanged)
             if (showSettings) {
                 SettingsDialog(
