@@ -29,7 +29,7 @@ import androidx.media3.common.C
 class OpenAITTSClient(private val context: Context) {
     private val client = OkHttpClient()
     private var exoPlayer: ExoPlayer? = null
-    private val apiKey = "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"
+    private val apiKey = BuildConfig.OPENAI_API_KEY
     private var lastAudioFile: File? = null
     private var retryCount = 0
     private val retryScope = CoroutineScope(Dispatchers.Main)
