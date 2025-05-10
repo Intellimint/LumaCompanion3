@@ -18,6 +18,13 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
 import java.io.FileOutputStream
 import android.net.Uri
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.BaseDataSource
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import java.io.InputStream
+import org.json.JSONObject
+import androidx.media3.common.C
 
 class OpenAITTSClient(private val context: Context) {
     private val client = OkHttpClient()
@@ -71,15 +78,15 @@ class OpenAITTSClient(private val context: Context) {
      * This ensures ExoPlayer plays the entire response without cutting off.
      */
     private suspend fun downloadAudioFull(text: String): File = withContext(Dispatchers.IO) {
-        val jsonBody = """
-            {
-                "model": "tts-1",
-                "voice": "shimmer",
-                "input": "$text",
-                "response_format": "mp3",
-                "stream": true
-            }
-        """.trimIndent()
+        Log.d("OpenAITTSClient", "TTS request text: '$text'")
+        val json = JSONObject().apply {
+            put("model", "tts-1")
+            put("voice", "shimmer")
+            put("input", text)
+            put("response_format", "mp3")
+        }
+        val jsonBody = json.toString()
+        Log.d("OpenAITTSClient", "TTS request body: $jsonBody")
 
         val request = Request.Builder()
             .url("https://api.openai.com/v1/audio/speech")
@@ -89,7 +96,9 @@ class OpenAITTSClient(private val context: Context) {
             .build()
 
         val response = client.newCall(request).execute()
+        Log.d("OpenAITTSClient", "TTS response code: ${response.code}, message: ${response.message}")
         if (!response.isSuccessful) {
+            Log.e("OpenAITTSClient", "TTS API error body: ${response.body?.string()}")
             throw Exception("Failed to get audio: ${response.code}")
         }
 
@@ -138,5 +147,98 @@ class OpenAITTSClient(private val context: Context) {
     fun release() {
         exoPlayer?.release()
         exoPlayer = null
+    }
+
+    /**
+     * Streams audio from OpenAI's TTS API and plays it in real time using ExoPlayer.
+     * Uses shimmer voice and opus_stream format for true streaming.
+     */
+    fun playStreamingShimmerVoice(text: String) {
+        val ttsRequest = JSONObject().apply {
+            put("model", "tts-1")
+            put("voice", "shimmer")
+            put("input", text)
+            put("response_format", "opus_stream")
+        }.toString()
+
+        val request = Request.Builder()
+            .url("https://api.openai.com/v1/audio/speech")
+            .addHeader("Authorization", "Bearer $apiKey")
+            .addHeader("Content-Type", "application/json")
+            .post(ttsRequest.toRequestBody("application/json".toMediaType()))
+            .build()
+
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val response = client.newCall(request).execute()
+                val inputStream = response.body?.byteStream()
+                if (inputStream != null) {
+                    playOpusStream(inputStream)
+                } else {
+                    Log.e("OpenAITTSClient", "Streaming TTS: InputStream is null")
+                }
+            } catch (e: Exception) {
+                Log.e("OpenAITTSClient", "Streaming TTS error", e)
+            }
+        }
+    }
+
+    /**
+     * Plays an Opus audio stream using ExoPlayer and a custom DataSource.
+     */
+    private fun playOpusStream(inputStream: InputStream) {
+        val dataSourceFactory = DataSource.Factory {
+            object : BaseDataSource(true) {
+                override fun open(dataSpec: DataSpec): Long = C.LENGTH_UNSET.toLong()
+                override fun read(buffer: ByteArray, offset: Int, readLength: Int): Int = inputStream.read(buffer, offset, readLength)
+                override fun getUri(): Uri? = null
+                override fun close() = inputStream.close()
+            }
+        }
+        val mediaSource = ProgressiveMediaSource.Factory(dataSourceFactory)
+            .createMediaSource(MediaItem.fromUri("http://localhost/stream.opus"))
+        CoroutineScope(Dispatchers.Main).launch {
+            exoPlayer?.apply {
+                stop()
+                clearMediaItems()
+                setMediaSource(mediaSource)
+                prepare()
+                playWhenReady = true
+            }
+        }
+    }
+
+    /**
+     * Plays TTS audio and invokes a callback with the ExoPlayer instance when ready.
+     * This allows the caller to access the duration and schedule actions before playback ends.
+     */
+    suspend fun playShimmerVoiceWithDurationCallback(text: String, onPlayerReady: (ExoPlayer) -> Unit) {
+        try {
+            val audioFile = downloadAudioFull(text)
+            Log.d("OpenAITTSClient", "Audio file ready, scheduling playback with duration callback.")
+            withContext(Dispatchers.Main) {
+                exoPlayer?.let { player ->
+                    player.stop()
+                    player.clearMediaItems()
+                    val fileUri = "file://${audioFile.absolutePath}"
+                    lastAudioFile = audioFile
+                    player.setMediaItem(MediaItem.fromUri(fileUri))
+                    player.prepare()
+                    // Add a one-time listener for STATE_READY
+                    val listener = object : Player.Listener {
+                        override fun onPlaybackStateChanged(state: Int) {
+                            if (state == Player.STATE_READY) {
+                                player.removeListener(this)
+                                onPlayerReady(player)
+                                player.play()
+                            }
+                        }
+                    }
+                    player.addListener(listener)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("OpenAITTSClient", "Error playing audio with duration callback", e)
+        }
     }
 } 
