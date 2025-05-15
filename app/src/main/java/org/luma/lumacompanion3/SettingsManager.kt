@@ -2,6 +2,8 @@ package org.luma.lumacompanion3
 
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -20,8 +22,19 @@ object SettingsManager {
         val religion: String?
     )
 
-    private fun prefs(context: Context): SharedPreferences =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private fun prefs(context: Context): SharedPreferences {
+        val masterKey = MasterKey.Builder(context)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+        
+        return EncryptedSharedPreferences.create(
+            context,
+            PREFS_NAME,
+            masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
+    }
 
     suspend fun setName(context: Context, name: String) = withContext(Dispatchers.IO) {
         prefs(context).edit().putString(KEY_NAME, name).apply()
@@ -46,5 +59,9 @@ object SettingsManager {
     }
     suspend fun getDemoMode(context: Context): Boolean = withContext(Dispatchers.IO) {
         prefs(context).getBoolean(KEY_DEMO_MODE, true)
+    }
+    
+    suspend fun clear(context: Context) = withContext(Dispatchers.IO) {
+        prefs(context).edit().clear().apply()
     }
 } 

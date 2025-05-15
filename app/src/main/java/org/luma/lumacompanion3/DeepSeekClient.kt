@@ -9,9 +9,11 @@ import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import okhttp3.ConnectionSpec
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.Request
 import okhttp3.RequestBody
+import okhttp3.TlsVersion
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -57,6 +59,15 @@ class DeepSeekClient {
 
         val client = OkHttpClient.Builder()
             .addInterceptor(logging)
+            .addInterceptor(RedactingInterceptor())
+            .connectionSpecs(
+                listOf(
+                    ConnectionSpec.Builder(ConnectionSpec.MODERN_TLS)
+                        .tlsVersions(TlsVersion.TLS_1_2, TlsVersion.TLS_1_3)
+                        .allEnabledCipherSuites()
+                        .build()
+                )
+            )
             .build()
 
         val retrofit = Retrofit.Builder()
