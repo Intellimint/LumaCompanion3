@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -5,10 +7,10 @@ plugins {
 }
 
 // Read local.properties file
-val localProperties = java.util.Properties().apply {
+val localProperties = Properties().apply {
     val localPropertiesFile = rootProject.file("local.properties")
     if (localPropertiesFile.exists()) {
-        load(localPropertiesFile.inputStream())
+        localPropertiesFile.inputStream().use { load(it) }
     }
 }
 
@@ -28,6 +30,12 @@ android {
         // Add API keys to BuildConfig
         buildConfigField("String", "OPENAI_API_KEY", "\"${localProperties.getProperty("OPENAI_API_KEY", "")}\"")
         buildConfigField("String", "DEEPSEEK_API_KEY", "\"${localProperties.getProperty("DEEPSEEK_API_KEY", "")}\"")
+        buildConfigField("String", "TTS_PROVIDER", "\"${localProperties.getProperty("TTS_PROVIDER", "")}\"")
+        buildConfigField("String", "DAILY_API_KEY", "\"${localProperties.getProperty("DAILY_API_KEY", "")}\"")
+        buildConfigField("String", "DAILY_SAMPLE_ROOM_URL", "\"${localProperties.getProperty("DAILY_SAMPLE_ROOM_URL", "")}\"")
+        buildConfigField("String", "ELEVENLABS_API_KEY", "\"${localProperties.getProperty("ELEVENLABS_API_KEY", "")}\"")
+        buildConfigField("String", "ELEVENLABS_VOICE_ID", "\"${localProperties.getProperty("ELEVENLABS_VOICE_ID", "")}\"")
+        buildConfigField("String", "OPENAI_MODEL", "\"${localProperties.getProperty("OPENAI_MODEL", "")}\"")
     }
 
     buildTypes {

@@ -80,6 +80,11 @@ import androidx.media3.common.C
 import androidx.compose.ui.zIndex
 import android.speech.tts.TextToSpeech
 import android.speech.tts.Voice
+import org.luma.lumacompanion3.ConversationLogger
+import org.luma.lumacompanion3.analyzeSentimentWithOpenAI
+import java.io.File
+import org.json.JSONObject
+import android.content.Context
 
 private val Orange = Color(0xFFF26B14)
 private val DarkGrey = Color(0xFF18191A)
@@ -97,7 +102,7 @@ data class WaveData(
 
 class MainActivity : ComponentActivity() {
     private lateinit var speechRecognizer: SpeechRecognizer
-    private lateinit var ttsClient: OpenAITTSClient
+    private var ttsClient: Any? = null // Can be OpenAITTSClient or ElevenLabsTTSClient
     private val deepSeekClient = DeepSeekClient()
     private var isListening = false
     private var persistentListening = false
@@ -131,6 +136,7 @@ class MainActivity : ComponentActivity() {
     private var recognitionActive = false
     private var restartRecognitionJob: Job? = null
     private lateinit var recognitionIntent: Intent
+    private var lumaCaption by mutableStateOf("")
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -138,7 +144,7 @@ class MainActivity : ComponentActivity() {
         if (isGranted) {
             startListening()
         } else {
-            Toast.makeText(this, "Microphone permission is required", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Microphone permission is required to use Luma.", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -148,9 +154,14 @@ class MainActivity : ComponentActivity() {
         try {
             speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
             initializeRecognitionIntent()
-            ttsClient = OpenAITTSClient(this)
+            ttsClient = if (BuildConfig.TTS_PROVIDER.equals("elevenlabs", ignoreCase = true)) {
+                ElevenLabsTTSClient(this)
+            } else {
+                OpenAITTSClient(this)
+            }
             tts = TextToSpeech(this) { status ->
                 if (status == TextToSpeech.SUCCESS) {
+                    Log.d("LumaTTS", "TTS initialized successfully")
                     val voices = tts?.voices?.toList() ?: emptyList()
                     val usVoices = voices.filter {
                         it.locale.language == "en" && it.locale.country == "US"
@@ -173,47 +184,42 @@ class MainActivity : ComponentActivity() {
                         Log.w("LumaTTS", "No suitable US English voice found. Using default.")
                     }
                 } else {
-                    Log.e("LumaTTS", "TextToSpeech initialization failed.")
+                    Log.e("LumaTTS", "TTS initialization failed: status=$status")
                 }
             }
 
-        setContent {
-                LumaCompanionTheme {
-                    var showSettings by remember { mutableStateOf(false) }
-                    var demoMode by remember { mutableStateOf(true) }
-                    var isIdle by remember { mutableStateOf(false) }
-                    var composeIsListeningOrSpeaking by remember { mutableStateOf(false) }
-                    val context = LocalContext.current
+            setContent {
+                var showSettings by remember { mutableStateOf(false) }
+                var isIdle by remember { mutableStateOf(false) }
+                var composeIsListeningOrSpeaking by remember { mutableStateOf(false) }
+                var showLogViewer by remember { mutableStateOf(false) }
+                val context = LocalContext.current
 
-                    // Keep isListeningOrSpeaking in sync
-                    LaunchedEffect(composeIsListeningOrSpeaking) {
-                        isListeningOrSpeaking = composeIsListeningOrSpeaking
-                    }
+                // Load personalization on launch
+                LaunchedEffect(Unit) {
+                    personalization = SettingsManager.getPersonalization(context)
+                    isIdle = true // Always start in idle/screensaver
+                }
 
-                    // Load personalization and demo mode on launch
-                    LaunchedEffect(Unit) {
-                        personalization = SettingsManager.getPersonalization(context)
-                        demoMode = SettingsManager.getDemoMode(context)
-                        if (!demoMode) {
-                            isIdle = true
-                        }
-                    }
+                val onViewLogs = {
+                    Toast.makeText(context, "View Logs pressed", Toast.LENGTH_SHORT).show()
+                    showLogViewer = true
+                }
 
-                    // Keep isIdleState in sync with Compose state
-                    LaunchedEffect(isIdle) { isIdleState = isIdle }
-
-                    Surface(
-                        modifier = Modifier.fillMaxSize(),
-                        color = DarkGrey
-                    ) {
-                        Box(Modifier.fillMaxSize()) {
-                            if (!demoMode && isIdle) {
-                                ScreensaverUI(
-                                    onTap = {
-                                        isIdle = false
-                                        composeIsListeningOrSpeaking = true
-                                        persistentListening = true
-                                        isListening = false
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = DarkGrey
+                ) {
+                    Box(Modifier.fillMaxSize()) {
+                        if (isIdle) {
+                            ScreensaverUI(
+                                onTap = {
+                                    isIdle = false
+                                    composeIsListeningOrSpeaking = true
+                                    persistentListening = true
+                                    isListening = false
+                                    // Request mic permission before starting listening
+                                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
                                         val wakePhrase = buildWakePhrase()
                                         if (wakePhrase.isNotBlank()) {
                                             playTTSWithCallback(wakePhrase) { startListening() }
@@ -221,90 +227,111 @@ class MainActivity : ComponentActivity() {
                                             Log.w("Luma", "Wake phrase was blank, skipping TTS playback.")
                                             startListening()
                                         }
+                                    } else {
+                                        requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                                     }
-                                )
-                            } else if (!demoMode && composeIsListeningOrSpeaking) {
-                                VoiceWaveformUI()
-                            } else {
-                                MainScreen(
-                                    onTapToSpeak = {
-                                        if (demoMode) {
-                                            checkPermissionAndStartListening(
-                                                onResult = { recognizedText ->
-                                                    mainScope.launch {
-                                                        isLoading = true
-                                                        val timestamp = getCurrentTimestamp()
-                                                        val userMessageForApi = "User said: $recognizedText $timestamp"
-                                                        val updatedConversation = conversation + ChatMessage("user", recognizedText)
-                                                        val updatedConversationForApi = conversation + ChatMessage("user", userMessageForApi)
-                                                        val trimmedConversation = trimConversationToTokenLimit(updatedConversationForApi, 5000)
-                                                        val pers = SettingsManager.getPersonalization(context)
-                                                        personalization = pers
-                                                        val response = deepSeekClient.getResponseWithHistory(trimmedConversation, pers)
-                                                        val newConversation = updatedConversation + ChatMessage("assistant", response)
-                                                        conversation = newConversation
-                                                        isLoading = false
-                                                        if (response.isNotBlank()) {
-                                                            playTTSWithCallback(response) { startListening() }
-                                                        } else {
-                                                            Log.w("Luma", "TTS response was blank, skipping TTS playback.")
-                                                            startListening()
-                                                        }
-                                                    }
-                                                }
-                                            )
-                                        } else {
-                                            isIdle = false
-                                            composeIsListeningOrSpeaking = true
-                                            persistentListening = true
-                                            isListening = false
-                                            startPersistentListeningLoop(
-                                                context = context,
-                                                conversationState = { conversation },
-                                                setConversation = { conversation = it },
-                                                setIsLoading = { isLoading = it },
-                                                setIsIdle = { newIsIdle -> isIdle = newIsIdle },
-                                                personalizationState = { personalization },
-                                                setIsListeningOrSpeaking = { composeIsListeningOrSpeaking = it }
-                                            )
-                                            resetInactivityTimer {
-                                                mainScope.launch {
-                                                    persistentListening = false
-                                                    isIdle = true
-                                                    val wakePhrase = buildWakePhrase()
-                                                    if (wakePhrase.isNotBlank()) {
-                                                        playTTSWithCallback(wakePhrase) { startListening() }
-                                                    } else {
-                                                        Log.w("Luma", "Wake phrase was blank, skipping TTS playback.")
-                                                        startListening()
-                                                    }
+                                },
+                                onViewLogs = onViewLogs
+                            )
+                        } else if (composeIsListeningOrSpeaking) {
+                            VoiceWaveformUI(
+                                onClose = {
+                                    isIdle = true
+                                    composeIsListeningOrSpeaking = false
+                                    persistentListening = false
+                                    isListening = false
+                                    stopContinuousRecognition()
+                                    lumaCaption = ""
+                                },
+                                onViewLogs = onViewLogs
+                            )
+                        } else {
+                            MainScreen(
+                                onTapToSpeak = {
+                                    isIdle = false
+                                    composeIsListeningOrSpeaking = true
+                                    persistentListening = true
+                                    isListening = false
+                                    // Request mic permission before starting listening
+                                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                                        startPersistentListeningLoop(
+                                            context = context,
+                                            conversationState = { conversation },
+                                            setConversation = { conversation = it },
+                                            setIsLoading = { isLoading = it },
+                                            setIsIdle = { newIsIdle -> isIdle = newIsIdle },
+                                            personalizationState = { personalization },
+                                            setIsListeningOrSpeaking = { composeIsListeningOrSpeaking = it }
+                                        )
+                                        resetInactivityTimer {
+                                            mainScope.launch {
+                                                persistentListening = false
+                                                isIdle = true
+                                                val wakePhrase = buildWakePhrase()
+                                                if (wakePhrase.isNotBlank()) {
+                                                    playTTSWithCallback(wakePhrase) { startListening() }
+                                                } else {
+                                                    Log.w("Luma", "Wake phrase was blank, skipping TTS playback.")
+                                                    startListening()
                                                 }
                                             }
                                         }
-                                    },
-                                    conversation = conversation,
-                                    isLoading = isLoading,
-                                    onSettingsClick = { showSettings = true }
-                                )
-                            }
-                            if (showSettings) {
-                                SettingsDialog(
-                                    initial = personalization,
-                                    demoMode = demoMode,
-                                    onDismiss = { showSettings = false },
-                                    onSave = { name, pronouns, pronounsCustom, religion, demoModeValue ->
-                                        mainScope.launch {
-                                            SettingsManager.setName(context, name)
-                                            SettingsManager.setPronouns(context, pronouns, pronounsCustom)
-                                            SettingsManager.setReligion(context, religion)
-                                            SettingsManager.setDemoMode(context, demoModeValue)
-                                            personalization = SettingsManager.getPersonalization(context)
-                                            demoMode = demoModeValue
-                                            showSettings = false
-                                        }
+                                    } else {
+                                        requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                                     }
-                                )
-                            }
+                                },
+                                conversation = conversation,
+                                isLoading = isLoading,
+                                onSettingsClick = { showSettings = true },
+                                onClose = {
+                                    isIdle = true
+                                    composeIsListeningOrSpeaking = false
+                                    persistentListening = false
+                                    isListening = false
+                                    stopContinuousRecognition()
+                                    lumaCaption = ""
+                                }
+                            )
+                        }
+                        if (showSettings) {
+                            SettingsDialog(
+                                initial = personalization,
+                                onDismiss = { showSettings = false },
+                                onSave = { name, pronouns, pronounsCustom, religion ->
+                                    mainScope.launch {
+                                        SettingsManager.setName(context, name)
+                                        SettingsManager.setPronouns(context, pronouns, pronounsCustom)
+                                        SettingsManager.setReligion(context, religion)
+                                        personalization = SettingsManager.getPersonalization(context)
+                                        showSettings = false
+                                        // Log personalization change
+                                        val pronounsDisplay = if (pronouns == "custom") pronounsCustom ?: "(custom)" else pronouns
+                                        val userInput = "Personalization updated: Name set to $name, pronouns set to $pronounsDisplay, religion set to $religion"
+                                        ConversationLogger.saveEntry(
+                                            context = context,
+                                            userInput = userInput,
+                                            aiResponse = "(Personalization updated)",
+                                            sentiment = "Neutral",
+                                            flags = ModerationResult(
+                                                flagged = false,
+                                                selfHarmScore = 0.0,
+                                                violenceScore = 0.0,
+                                                hateScore = 0.0,
+                                                harassmentScore = 0.0,
+                                                overallSentiment = "Neutral"
+                                            )
+                                        )
+                                    }
+                                },
+                                onViewLogs = onViewLogs
+                            )
+                        }
+                        if (showLogViewer) {
+                            LogViewerDialog(onClose = { showLogViewer = false })
+                        }
+                        // Overlay LumaCaption if lumaCaption is not blank
+                        if (lumaCaption.isNotBlank()) {
+                            LumaCaption(lumaCaption)
                         }
                     }
                 }
@@ -428,38 +455,80 @@ class MainActivity : ComponentActivity() {
 
     // Modify OpenAITTSClient to notify when speaking starts/ends
     private fun playTTSWithCallback(text: String, onComplete: () -> Unit) {
+        stopContinuousRecognition() // Always stop listening before TTS
         isSpeaking = true
         shouldRestartListening = false
+        lumaCaption = text // Set caption before TTS
         if (text.isBlank()) {
             isSpeaking = false
             shouldRestartListening = true
+            isListening = false
+            recognitionActive = false
+            // lumaCaption = "" // Do NOT clear caption here
             onComplete()
             return
         }
-        val utteranceId = System.currentTimeMillis().toString()
-        tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) {
-                // No-op
-            }
-            override fun onDone(utteranceId: String?) {
-                runOnUiThread {
+        if (ttsClient is ElevenLabsTTSClient) {
+            mainScope.launch {
+                (ttsClient as ElevenLabsTTSClient).speak(text) {
                     isSpeaking = false
                     shouldRestartListening = true
+                    isListening = false
+                    recognitionActive = false
+                    // lumaCaption = "" // Do NOT clear caption here
                     onComplete()
                 }
             }
-            override fun onError(utteranceId: String?) {
-                runOnUiThread {
-                    isSpeaking = false
-                    shouldRestartListening = true
-                    onComplete()
-                }
+        } else if (ttsClient is OpenAITTSClient) {
+            mainScope.launch {
+                (ttsClient as OpenAITTSClient).playShimmerVoice(text)
+                isSpeaking = false
+                shouldRestartListening = true
+                isListening = false
+                recognitionActive = false
+                // lumaCaption = "" // Do NOT clear caption here
+                onComplete()
             }
-        })
-        val params = android.os.Bundle().apply {
-            putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId)
+        } else {
+            // fallback: use Android TTS
+            val utteranceId = System.currentTimeMillis().toString()
+            tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) {
+                    Log.d("LumaTTS", "TTS onStart: utteranceId=$utteranceId")
+                }
+                override fun onDone(utteranceId: String?) {
+                    Log.d("LumaTTS", "TTS onDone: utteranceId=$utteranceId")
+                    runOnUiThread {
+                        isSpeaking = false
+                        shouldRestartListening = true
+                        isListening = false
+                        recognitionActive = false
+                        // lumaCaption = "" // Do NOT clear caption here
+                        onComplete()
+                    }
+                }
+                override fun onError(utteranceId: String?) {
+                    Log.e("LumaTTS", "TTS onError: utteranceId=$utteranceId")
+                    runOnUiThread {
+                        isSpeaking = false
+                        shouldRestartListening = true
+                        isListening = false
+                        recognitionActive = false
+                        // lumaCaption = "" // Do NOT clear caption here
+                        onComplete()
+                    }
+                }
+            })
+            val params = android.os.Bundle().apply {
+                putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId)
+            }
+            val speakStatus = tts?.speak(text, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
+            if (speakStatus == TextToSpeech.SUCCESS) {
+                Log.d("LumaTTS", "TTS speak() called: $text")
+            } else {
+                Log.e("LumaTTS", "TTS speak() failed: status=$speakStatus, text=$text")
+            }
         }
-        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
     }
 
     // Update the persistent listening loop
@@ -495,11 +564,13 @@ class MainActivity : ComponentActivity() {
 
                 Log.d("Luma", "Processing recognized speech for DeepSeek and TTS: '$recognizedText'")
                 val timestamp = getCurrentTimestamp()
-                val userMessageForApi = "User said: $recognizedText $timestamp"
-                val updatedConversation = conversationState() + ChatMessage("user", recognizedText)
-                val updatedConversationForApi = conversationState() + ChatMessage("user", userMessageForApi)
+                val userMessageForModel = buildUserMessageForModel(recognizedText, personalizationState(), timestamp)
+                val updatedConversation = conversationState() + ChatMessage("user", userMessageForModel)
+                val updatedConversationForApi = conversationState() + ChatMessage("user", userMessageForModel)
                 val trimmedConversation = trimConversationToTokenLimit(updatedConversationForApi, 5000)
-                val pers = SettingsManager.getPersonalization(context)
+                val pers = personalizationState()
+                // Sentiment analysis and logging
+                val sentimentResult = analyzeSentimentWithOpenAI(recognizedText, BuildConfig.OPENAI_API_KEY)
 
                 if (useStreaming) {
                     // Streaming mode
@@ -514,9 +585,19 @@ class MainActivity : ComponentActivity() {
                             }
                         setIsLoading(false)
                         val response = responseBuilder.toString()
+                        val trimmedResponse = trimResponseForSpeech(response)
                         Log.d("Luma", "DeepSeek streaming response: '$response'")
-                        if (response.isNotBlank()) {
-                            playTTSWithCallback(response) { startListening() }
+                        if (sentimentResult != null) {
+                            ConversationLogger.saveEntry(
+                                context = context,
+                                userInput = recognizedText,
+                                aiResponse = response,
+                                sentiment = sentimentResult.overallSentiment,
+                                flags = sentimentResult
+                            )
+                        }
+                        if (trimmedResponse.isNotBlank()) {
+                            playTTSWithCallback(trimmedResponse) { startListening() }
                         } else {
                             Log.w("Luma", "TTS response was blank, skipping TTS playback.")
                             startListening()
@@ -531,12 +612,22 @@ class MainActivity : ComponentActivity() {
                 } else {
                     // Old synchronous mode
                     val response = deepSeekClient.getResponseWithHistory(trimmedConversation, pers)
+                    val trimmedResponse = trimResponseForSpeech(response)
                     Log.d("Luma", "DeepSeek sync response: '$response'")
                     val newConversation = updatedConversation + ChatMessage("assistant", response)
                     setConversation(newConversation)
                     setIsLoading(false)
-                    if (response.isNotBlank()) {
-                        playTTSWithCallback(response) { startListening() }
+                    if (sentimentResult != null) {
+                        ConversationLogger.saveEntry(
+                            context = context,
+                            userInput = recognizedText,
+                            aiResponse = response,
+                            sentiment = sentimentResult.overallSentiment,
+                            flags = sentimentResult
+                        )
+                    }
+                    if (trimmedResponse.isNotBlank()) {
+                        playTTSWithCallback(trimmedResponse) { startListening() }
                     } else {
                         Log.w("Luma", "TTS response was blank, skipping TTS playback.")
                         startListening()
@@ -607,16 +698,14 @@ class MainActivity : ComponentActivity() {
 
     // Beautiful screensaver UI for Standard Mode idle state
     @Composable
-    fun ScreensaverUI(onTap: () -> Unit) {
+    fun ScreensaverUI(onTap: () -> Unit, onViewLogs: () -> Unit) {
         var showSettings by remember { mutableStateOf(false) }
         val context = LocalContext.current
         var personalization by remember { mutableStateOf<SettingsManager.Personalization?>(null) }
-        var demoMode by remember { mutableStateOf(true) }
 
         // Load current settings
         LaunchedEffect(Unit) {
             personalization = SettingsManager.getPersonalization(context)
-            demoMode = SettingsManager.getDemoMode(context)
         }
 
         val phrases = listOf(
@@ -813,19 +902,34 @@ class MainActivity : ComponentActivity() {
             if (showSettings) {
                 SettingsDialog(
                     initial = personalization,
-                    demoMode = demoMode,
                     onDismiss = { showSettings = false },
-                    onSave = { name, pronouns, pronounsCustom, religion, demoModeValue ->
+                    onSave = { name, pronouns, pronounsCustom, religion ->
                         mainScope.launch {
                             SettingsManager.setName(context, name)
                             SettingsManager.setPronouns(context, pronouns, pronounsCustom)
                             SettingsManager.setReligion(context, religion)
-                            SettingsManager.setDemoMode(context, demoModeValue)
                             personalization = SettingsManager.getPersonalization(context)
-                            demoMode = demoModeValue
                             showSettings = false
+                            // Log personalization change
+                            val pronounsDisplay = if (pronouns == "custom") pronounsCustom ?: "(custom)" else pronouns
+                            val userInput = "Personalization updated: Name set to $name, pronouns set to $pronounsDisplay, religion set to $religion"
+                            ConversationLogger.saveEntry(
+                                context = context,
+                                userInput = userInput,
+                                aiResponse = "(Personalization updated)",
+                                sentiment = "Neutral",
+                                flags = ModerationResult(
+                                    flagged = false,
+                                    selfHarmScore = 0.0,
+                                    violenceScore = 0.0,
+                                    hateScore = 0.0,
+                                    harassmentScore = 0.0,
+                                    overallSentiment = "Neutral"
+                                )
+                            )
                         }
-                    }
+                    },
+                    onViewLogs = onViewLogs
                 )
             }
         }
@@ -833,16 +937,14 @@ class MainActivity : ComponentActivity() {
 
     // Placeholder for voice waveform animation (iridescent ripple)
     @Composable
-    fun VoiceWaveformUI() {
+    fun VoiceWaveformUI(onClose: () -> Unit, onViewLogs: () -> Unit) {
         var showSettings by remember { mutableStateOf(false) }
         val context = LocalContext.current
         var personalization by remember { mutableStateOf<SettingsManager.Personalization?>(null) }
-        var demoMode by remember { mutableStateOf(true) }
 
         // Load current settings
         LaunchedEffect(Unit) {
             personalization = SettingsManager.getPersonalization(context)
-            demoMode = SettingsManager.getDemoMode(context)
         }
 
         // Get the most recent user and Luma messages
@@ -899,6 +1001,18 @@ class MainActivity : ComponentActivity() {
             modifier = Modifier.fillMaxSize()
         ) {
             val sectionHeight = maxHeight / 2
+
+            // Close button in top left
+            IconButton(
+                onClick = onClose,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(16.dp)
+                    .size(48.dp)
+                    .zIndex(2f)
+            ) {
+                Text("✕", fontSize = 32.sp, color = Color.White)
+            }
 
             // Draw the waves first, but move them down by 60.dp
             Box(
@@ -963,19 +1077,34 @@ class MainActivity : ComponentActivity() {
             if (showSettings) {
                 SettingsDialog(
                     initial = personalization,
-                    demoMode = demoMode,
                     onDismiss = { showSettings = false },
-                    onSave = { name, pronouns, pronounsCustom, religion, demoModeValue ->
+                    onSave = { name, pronouns, pronounsCustom, religion ->
                         mainScope.launch {
                             SettingsManager.setName(context, name)
                             SettingsManager.setPronouns(context, pronouns, pronounsCustom)
                             SettingsManager.setReligion(context, religion)
-                            SettingsManager.setDemoMode(context, demoModeValue)
                             personalization = SettingsManager.getPersonalization(context)
-                            demoMode = demoModeValue
                             showSettings = false
+                            // Log personalization change
+                            val pronounsDisplay = if (pronouns == "custom") pronounsCustom ?: "(custom)" else pronouns
+                            val userInput = "Personalization updated: Name set to $name, pronouns set to $pronounsDisplay, religion set to $religion"
+                            ConversationLogger.saveEntry(
+                                context = context,
+                                userInput = userInput,
+                                aiResponse = "(Personalization updated)",
+                                sentiment = "Neutral",
+                                flags = ModerationResult(
+                                    flagged = false,
+                                    selfHarmScore = 0.0,
+                                    violenceScore = 0.0,
+                                    hateScore = 0.0,
+                                    harassmentScore = 0.0,
+                                    overallSentiment = "Neutral"
+                                )
+                            )
                         }
-                    }
+                    },
+                    onViewLogs = onViewLogs
                 )
             }
         }
@@ -1062,6 +1191,7 @@ class MainActivity : ComponentActivity() {
         if (recognitionActive) return
         recognitionActive = true
         currentPartialResults.clear()
+        Log.d("LumaRecognizer", "startContinuousRecognition called")
         
         val recognitionListener = object : android.speech.RecognitionListener {
             private var isListeningForSpeech = false
@@ -1070,59 +1200,65 @@ class MainActivity : ComponentActivity() {
             private var bufferTimer: Job? = null
 
             override fun onResults(results: Bundle?) {
-                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                if (!matches.isNullOrEmpty()) {
-                    val recognizedText = matches[0].trim()
-                    if (recognizedText.isNotBlank() && recognizedText != lastProcessedText) {
-                        lastProcessedText = recognizedText
-                        resultBuffer.append(recognizedText).append(" ")
-                        
-                        // Schedule buffer processing
-                        bufferTimer?.cancel()
-                        bufferTimer = mainScope.launch {
-                            delay(800) // Wait for more potential speech
-                            val bufferedText = resultBuffer.toString().trim()
-                            if (bufferedText.isNotBlank()) {
-                                onResult(bufferedText)
-                                resultBuffer.clear()
-                            }
+                val recognizedText = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                Log.d("LumaRecognizer", "✅ Final recognized text: $recognizedText")
+
+                if (!recognizedText.isNullOrBlank()) {
+                    Log.d("LumaRecognizer", "🔄 Sending to model...")
+                    mainScope.launch {
+                        val pers = personalization
+                        val timestamp = getCurrentTimestamp()
+                        val userMessageForModel = buildUserMessageForModel(recognizedText, pers, timestamp)
+                        val aiResponse = deepSeekClient.getResponse(userMessageForModel)
+                        Log.d("LumaRecognizer", "🤖 Model replied: $aiResponse")
+                        // Sentiment analysis and logging
+                        val sentimentResult = analyzeSentimentWithOpenAI(recognizedText, BuildConfig.OPENAI_API_KEY)
+                        if (sentimentResult != null) {
+                            ConversationLogger.saveEntry(
+                                context = this@MainActivity,
+                                userInput = recognizedText,
+                                aiResponse = aiResponse,
+                                sentiment = sentimentResult.overallSentiment,
+                                flags = sentimentResult
+                            )
                         }
+                        playTTSWithCallback(aiResponse) { startListening() }
                     }
+                } else {
+                    Log.w("LumaRecognizer", "⚠️ No valid recognition result")
                 }
-                // Smoothly restart recognition
                 restartRecognition()
             }
 
             override fun onPartialResults(partialResults: Bundle?) {
+                Log.d("LumaRecognizer", "onPartialResults called: $partialResults")
                 val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 if (!matches.isNullOrEmpty()) {
                     val partialText = matches[0].trim()
+                    Log.d("LumaRecognizer", "Partial recognized text: $partialText")
                     if (partialText.isNotBlank() && partialText != lastPartialResult) {
                         lastPartialResult = partialText
                         currentPartialResults.setLength(0)
                         currentPartialResults.append(partialText)
-                        
-                        // Update UI or provide feedback that we're hearing the user
-                        Log.d("Luma", "Partial result: $partialText")
                     }
                 }
             }
 
             override fun onBeginningOfSpeech() {
                 isListeningForSpeech = true
-                Log.d("Luma", "Speech started")
+                Log.d("LumaRecognizer", "onBeginningOfSpeech: Speech started")
             }
 
             override fun onEndOfSpeech() {
                 isListeningForSpeech = false
-                Log.d("Luma", "Speech ended")
+                Log.d("LumaRecognizer", "onEndOfSpeech: Speech ended")
             }
 
             override fun onError(error: Int) {
+                Log.e("LumaRecognizer", "onError called: $error (${getErrorText(error)})")
                 when (error) {
                     SpeechRecognizer.ERROR_NO_MATCH -> {
                         if (currentPartialResults.isNotBlank()) {
-                            // Use partial results if available
                             val partialText = currentPartialResults.toString().trim()
                             if (partialText.isNotBlank() && partialText != lastProcessedText) {
                                 lastProcessedText = partialText
@@ -1132,7 +1268,6 @@ class MainActivity : ComponentActivity() {
                         restartRecognition()
                     }
                     SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
-                        // Process any buffered text before restarting
                         val bufferedText = resultBuffer.toString().trim()
                         if (bufferedText.isNotBlank()) {
                             onResult(bufferedText)
@@ -1141,9 +1276,8 @@ class MainActivity : ComponentActivity() {
                         restartRecognition()
                     }
                     else -> {
-                        Log.e("Luma", "Speech recognition error: $error")
                         mainScope.launch {
-                            delay(500) // Short delay before retry
+                            delay(500)
                             restartRecognition()
                         }
                     }
@@ -1154,30 +1288,53 @@ class MainActivity : ComponentActivity() {
                 if (!recognitionActive) return
                 restartRecognitionJob?.cancel()
                 restartRecognitionJob = mainScope.launch {
-                    delay(50) // Minimal delay for smooth transition
+                    delay(50)
                     if (recognitionActive && !isSpeaking) {
                         try {
+                            Log.d("LumaRecognizer", "Restarting recognition...")
                             speechRecognizer.startListening(recognitionIntent)
                         } catch (e: Exception) {
-                            Log.e("Luma", "Error restarting recognition", e)
+                            Log.e("LumaRecognizer", "Error restarting recognition", e)
                         }
                     }
                 }
             }
 
             override fun onReadyForSpeech(params: Bundle?) {
-                Log.d("Luma", "Ready for speech")
+                Log.d("LumaRecognizer", "onReadyForSpeech: $params")
             }
-            override fun onRmsChanged(rmsdB: Float) {}
-            override fun onBufferReceived(buffer: ByteArray?) {}
-            override fun onEvent(eventType: Int, params: Bundle?) {}
+            override fun onRmsChanged(rmsdB: Float) {
+                Log.d("LumaRecognizer", "onRmsChanged: $rmsdB dB")
+            }
+            override fun onBufferReceived(buffer: ByteArray?) {
+                Log.d("LumaRecognizer", "onBufferReceived: ${buffer?.size ?: 0} bytes")
+            }
+            override fun onEvent(eventType: Int, params: Bundle?) {
+                Log.d("LumaRecognizer", "onEvent: type=$eventType, params=$params")
+            }
         }
 
         speechRecognizer.setRecognitionListener(recognitionListener)
         try {
+            Log.d("LumaRecognizer", "Calling startListening() with intent: $recognitionIntent")
             speechRecognizer.startListening(recognitionIntent)
         } catch (e: Exception) {
-            Log.e("Luma", "Error starting recognition", e)
+            Log.e("LumaRecognizer", "Error starting recognition", e)
+        }
+    }
+
+    private fun getErrorText(errorCode: Int): String {
+        return when (errorCode) {
+            SpeechRecognizer.ERROR_AUDIO -> "Audio recording error"
+            SpeechRecognizer.ERROR_CLIENT -> "Client side error"
+            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Insufficient permissions"
+            SpeechRecognizer.ERROR_NETWORK -> "Network error"
+            SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Network timeout"
+            SpeechRecognizer.ERROR_NO_MATCH -> "No match"
+            SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "RecognitionService busy"
+            SpeechRecognizer.ERROR_SERVER -> "Server error"
+            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech input"
+            else -> "Unknown error"
         }
     }
 
@@ -1208,11 +1365,107 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @Composable
+    fun LumaCaption(text: String) {
+        val scrollState = rememberScrollState()
+        val lineHeightSp = 40.sp // Half of previous 80.sp
+        val maxLines = 3
+        val context = LocalContext.current
+
+        // Smooth auto-scroll to bottom when text changes
+        LaunchedEffect(text) {
+            scrollState.animateScrollTo(scrollState.maxValue)
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(32.dp),
+            contentAlignment = Alignment.BottomCenter
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(0.5f)
+                    .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(24.dp))
+                    .padding(32.dp),
+                contentAlignment = Alignment.BottomCenter
+            ) {
+                Text(
+                    text = text,
+                    color = Color.White,
+                    fontSize = 32.sp, // Half of previous 64.sp
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                    lineHeight = lineHeightSp,
+                    maxLines = maxLines,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(scrollState)
+                )
+            }
+        }
+    }
+
+    // Function to trim response to 5 sentences or 40 words, whichever comes first
+    private fun trimResponseForSpeech(response: String): String {
+        if (response.isBlank()) return response
+        
+        // Split into sentences (handles common sentence endings)
+        val sentences = response.split(Regex("(?<=[.!?])\\s+"))
+        
+        // Count words
+        val words = response.split(Regex("\\s+"))
+        
+        // If response is already short enough, return as is
+        if (sentences.size <= 5 && words.size <= 40) {
+            return response
+        }
+        
+        // Take first 5 sentences or up to 40 words, whichever comes first
+        val trimmedSentences = mutableListOf<String>()
+        var wordCount = 0
+        
+        for (sentence in sentences) {
+            val sentenceWords = sentence.split(Regex("\\s+"))
+            if (wordCount + sentenceWords.size > 40) break
+            if (trimmedSentences.size >= 5) break
+            
+            trimmedSentences.add(sentence)
+            wordCount += sentenceWords.size
+        }
+        
+        val trimmedResponse = trimmedSentences.joinToString(" ")
+        return if (trimmedResponse != response) {
+            "$trimmedResponse... (Let me know if you'd like to hear more.)"
+        } else {
+            trimmedResponse
+        }
+    }
+
+    // Add this function to build the user message for the model
+    private fun buildUserMessageForModel(
+        recognizedText: String,
+        personalization: SettingsManager.Personalization?,
+        timestamp: String
+    ): String {
+        val name = personalization?.name?.takeIf { it.isNotBlank() } ?: "Unknown"
+        val pronouns = personalization?.let {
+            if (it.pronouns == "custom") it.pronounsCustom ?: "unspecified" else it.pronouns ?: "unspecified"
+        } ?: "unspecified"
+        val religion = personalization?.religion ?: "unspecified"
+        return "$recognizedText. [User's name: $name] $timestamp [User's pronouns: $pronouns] [User's religion preference: $religion] Your response?"
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         stopContinuousRecognition()
         speechRecognizer.destroy()
-        ttsClient.release()
+        when (ttsClient) {
+            is ElevenLabsTTSClient -> (ttsClient as ElevenLabsTTSClient).release()
+            is OpenAITTSClient -> (ttsClient as OpenAITTSClient).release()
+        }
         tts?.shutdown()
     }
 }
@@ -1237,13 +1490,25 @@ fun MainScreen(
     onTapToSpeak: () -> Unit,
     conversation: List<ChatMessage>,
     isLoading: Boolean,
-    onSettingsClick: () -> Unit
+    onSettingsClick: () -> Unit,
+    onClose: () -> Unit
 ) {
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(DarkGrey)
     ) {
+        // Close button in top left
+        IconButton(
+            onClick = onClose,
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(16.dp)
+                .size(48.dp)
+        ) {
+            Text("✕", fontSize = 32.sp, color = Color.White)
+        }
+
         Row(
             modifier = Modifier
                 .fillMaxSize()
@@ -1339,16 +1604,15 @@ fun ConversationList(conversation: List<ChatMessage>) {
 @Composable
 fun SettingsDialog(
     initial: SettingsManager.Personalization?,
-    demoMode: Boolean,
     onDismiss: () -> Unit,
-    onSave: (String, String, String?, String, Boolean) -> Unit
+    onSave: (String, String, String?, String) -> Unit,
+    onViewLogs: () -> Unit
 ) {
     var name by remember { mutableStateOf(initial?.name ?: "") }
     var pronouns by remember { mutableStateOf(initial?.pronouns ?: "") }
     var pronounsCustom by remember { mutableStateOf(initial?.pronounsCustom ?: "") }
     var religion by remember { mutableStateOf(initial?.religion ?: "") }
     var showCustomPronouns by remember { mutableStateOf(pronouns == "custom") }
-    var demoModeValue by remember { mutableStateOf(demoMode) }
 
     // --- Voice selection state ---
     val context = LocalContext.current
@@ -1365,6 +1629,13 @@ fun SettingsDialog(
         title = { Text("Patient Personalization", fontSize = 28.sp, fontWeight = FontWeight.Bold) },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
+                Button(
+                    onClick = onViewLogs,
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Orange)
+                ) {
+                    Text("View Logs", fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                }
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
@@ -1397,12 +1668,6 @@ fun SettingsDialog(
                     selected = religion,
                     onSelected = { religion = it }
                 )
-                Spacer(Modifier.height(16.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Demo Mode", fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                    Spacer(Modifier.width(12.dp))
-                    Switch(checked = demoModeValue, onCheckedChange = { demoModeValue = it })
-                }
                 Spacer(Modifier.height(24.dp))
                 // --- English (US) Voice Selector ---
                 Text("English (US) TTS Voice", fontWeight = FontWeight.Bold, fontSize = 20.sp)
@@ -1439,7 +1704,7 @@ fun SettingsDialog(
             }
         },
         confirmButton = {
-            Button(onClick = { onSave(name, pronouns, pronounsCustom, religion, demoModeValue) }) {
+            Button(onClick = { onSave(name, pronouns, pronounsCustom, religion) }) {
                 Text("Save")
             }
         },
@@ -1470,4 +1735,47 @@ fun DropdownMenuBox(options: List<String>, selected: String, onSelected: (String
             }
         }
     }
+}
+
+@Composable
+fun LogViewerDialog(onClose: () -> Unit) {
+    val context = LocalContext.current
+    val logs = remember {
+        val logFile = File(context.filesDir, "conversation_log.jsonl")
+        if (logFile.exists()) {
+            logFile.readLines().mapNotNull {
+                try { JSONObject(it) } catch (_: Exception) { null }
+            }
+        } else emptyList()
+    }
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text("Conversation Logs", fontSize = 28.sp, fontWeight = FontWeight.Bold) },
+        text = {
+            Box(Modifier.heightIn(max = 500.dp).verticalScroll(rememberScrollState())) {
+                Column {
+                    if (logs.isEmpty()) {
+                        Text("No logs found.", fontSize = 20.sp)
+                    } else {
+                        logs.forEach { log ->
+                            Column(Modifier.padding(vertical = 8.dp)) {
+                                Text("🕒 ${log.optString("timestamp")}", fontSize = 16.sp, color = Color.Gray)
+                                Text("👤 User: ${log.optString("userInput")}", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                                Text("🤖 Luma: ${log.optString("aiResponse")}", fontSize = 20.sp)
+                                Text("Sentiment: ${log.optString("sentiment")}", fontSize = 16.sp)
+                                if (log.optBoolean("flagged", false)) {
+                                    Text("⚠️ Flagged", color = Color.Red, fontSize = 16.sp)
+                                }
+                                Text("Scores: self-harm=${log.optDouble("selfHarmScore")}, violence=${log.optDouble("violenceScore")}, hate=${log.optDouble("hateScore")}, harassment=${log.optDouble("harassmentScore")}", fontSize = 14.sp, color = Color.Gray)
+                                Divider(Modifier.padding(vertical = 4.dp))
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onClose) { Text("Close") }
+        }
+    )
 }
