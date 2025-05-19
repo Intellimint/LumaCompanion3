@@ -201,6 +201,17 @@ class MainActivity : ComponentActivity() {
                     isIdle = true // Always start in idle/screensaver
                 }
 
+                // Kiosk mode setup
+                val devicePolicyManager = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as android.app.admin.DevicePolicyManager
+                val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+                val componentName = android.content.ComponentName(context, MyDeviceAdminReceiver::class.java)
+
+                if (devicePolicyManager.isDeviceOwnerApp(context.packageName)) {
+                    devicePolicyManager.setLockTaskPackages(componentName, arrayOf(context.packageName))
+                    // Comment this out for now to avoid locking yourself in during dev
+                    // startLockTask()
+                }
+
                 val onViewLogs = {
                     Toast.makeText(context, "View Logs pressed", Toast.LENGTH_SHORT).show()
                     showLogViewer = true

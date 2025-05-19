@@ -20,7 +20,7 @@ android {
 
     defaultConfig {
         applicationId = "org.luma.lumacompanion3"
-        minSdk = 24
+        minSdk = 27
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
