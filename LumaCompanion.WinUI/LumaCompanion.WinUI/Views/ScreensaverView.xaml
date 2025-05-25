@@ -1,0 +1,106 @@
+<Page
+    x:Class="LumaCompanion.WinUI.Views.ScreensaverView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:LumaCompanion.WinUI.Views"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Background="{StaticResource LumaDarkGreyBrush}">
+
+    <Grid x:Name="LayoutRoot" PointerPressed="Grid_PointerPressed">
+        <Grid.Resources>
+            <!-- Animation for the first radial gradient circle -->
+            <Storyboard x:Name="BackgroundAnimation1" RepeatBehavior="Forever" AutoReverse="True">
+                <PointAnimationUsingKeyFrames Storyboard.TargetName="GradientBrush1" Storyboard.TargetProperty="Center">
+                    <LinearPointKeyFrame KeyTime="0:0:0" Value="0.3,0.3"/>
+                    <LinearPointKeyFrame KeyTime="0:0:5" Value="0.7,0.3"/>
+                    <LinearPointKeyFrame KeyTime="0:0:10" Value="0.7,0.7"/>
+                    <LinearPointKeyFrame KeyTime="0:0:15" Value="0.3,0.7"/>
+                    <LinearPointKeyFrame KeyTime="0:0:20" Value="0.3,0.3"/>
+                </PointAnimationUsingKeyFrames>
+                <DoubleAnimation Storyboard.TargetName="GradientBrush1" Storyboard.TargetProperty="RadiusX"
+                                 From="0.5" To="0.8" Duration="0:0:10" AutoReverse="True"/>
+                <DoubleAnimation Storyboard.TargetName="GradientBrush1" Storyboard.TargetProperty="RadiusY"
+                                 From="0.5" To="0.8" Duration="0:0:10" AutoReverse="True"/>
+            </Storyboard>
+            <!-- Animation for the second radial gradient circle -->
+            <Storyboard x:Name="BackgroundAnimation2" RepeatBehavior="Forever" AutoReverse="True">
+                <PointAnimationUsingKeyFrames Storyboard.TargetName="GradientBrush2" Storyboard.TargetProperty="Center">
+                    <LinearPointKeyFrame KeyTime="0:0:0" Value="0.7,0.7"/>
+                    <LinearPointKeyFrame KeyTime="0:0:6" Value="0.3,0.7"/>
+                    <LinearPointKeyFrame KeyTime="0:0:12" Value="0.3,0.3"/>
+                    <LinearPointKeyFrame KeyTime="0:0:18" Value="0.7,0.3"/>
+                    <LinearPointKeyFrame KeyTime="0:0:24" Value="0.7,0.7"/>
+                </PointAnimationUsingKeyFrames>
+                 <DoubleAnimation Storyboard.TargetName="GradientBrush2" Storyboard.TargetProperty="RadiusX"
+                                 From="0.6" To="0.9" Duration="0:0:12" AutoReverse="True"/>
+                <DoubleAnimation Storyboard.TargetName="GradientBrush2" Storyboard.TargetProperty="RadiusY"
+                                 From="0.6" To="0.9" Duration="0:0:12" AutoReverse="True"/>
+            </Storyboard>
+
+            <!-- Text Fade Animations -->
+            <Storyboard x:Name="TextFadeOutAnimation">
+                <DoubleAnimation Storyboard.TargetName="CyclingPhraseTextBlock" Storyboard.TargetProperty="Opacity"
+                                 From="1.0" To="0.0" Duration="0:0:0.5"/>
+            </Storyboard>
+            <Storyboard x:Name="TextFadeInAnimation">
+                <DoubleAnimation Storyboard.TargetName="CyclingPhraseTextBlock" Storyboard.TargetProperty="Opacity"
+                                 From="0.0" To="1.0" Duration="0:0:0.5"/>
+            </Storyboard>
+        </Grid.Resources>
+
+        <!-- Animated Background Elements -->
+        <Ellipse Opacity="0.5">
+            <Ellipse.Fill>
+                <RadialGradientBrush x:Name="GradientBrush1" RadiusX="0.5" RadiusY="0.5" Center="0.5,0.5" GradientOrigin="0.5,0.5">
+                    <GradientStop Color="{StaticResource LumaOrangeColor}" Offset="0.0"/>
+                    <GradientStop Color="Transparent" Offset="1.0"/>
+                </RadialGradientBrush>
+            </Ellipse.Fill>
+        </Ellipse>
+        <Ellipse Opacity="0.4" Margin="100,50,0,0">
+            <Ellipse.Fill>
+                <RadialGradientBrush x:Name="GradientBrush2" RadiusX="0.6" RadiusY="0.6" Center="0.5,0.5" GradientOrigin="0.5,0.5">
+                    <GradientStop Color="#FF6B14F2" Offset="0.0"/> <!-- A Luma-like Purple -->
+                    <GradientStop Color="Transparent" Offset="1.0"/>
+                </RadialGradientBrush>
+            </Ellipse.Fill>
+        </Ellipse>
+
+        <!-- UI Content -->
+        <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="10">
+            <TextBlock x:Name="TimeTextBlock"
+                       Text="10:00 AM"
+                       FontSize="128" 
+                       FontWeight="Light"
+                       HorizontalAlignment="Center"
+                       Foreground="{StaticResource LumaWhiteBrush}"/>
+            <TextBlock x:Name="DateTextBlock"
+                       Text="Monday, May 5" 
+                       FontSize="32" 
+                       FontWeight="Light"
+                       HorizontalAlignment="Center"
+                       Margin="0,0,0,40"
+                       Foreground="{StaticResource LumaWhiteBrush}"/>
+            <TextBlock x:Name="CyclingPhraseTextBlock"
+                       Text="Hi, I'm Luma." 
+                       FontSize="48" 
+                       FontWeight="SemiBold"
+                       HorizontalAlignment="Center"
+                       TextAlignment="Center"
+                       TextWrapping="Wrap"
+                       MaxLines="2"
+                       Width="600" 
+                       Opacity="1.0"
+                       Foreground="{StaticResource LumaWhiteBrush}"/>
+        </StackPanel>
+
+        <Button x:Name="SettingsButton" 
+                VerticalAlignment="Top" HorizontalAlignment="Right" 
+                Margin="20" Padding="10" Background="Transparent" BorderThickness="0"
+                Click="SettingsButton_Click">
+            <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xE713;" FontSize="24" Foreground="{StaticResource LumaWhiteBrush}"/>
+        </Button>
+    </Grid>
+</Page>

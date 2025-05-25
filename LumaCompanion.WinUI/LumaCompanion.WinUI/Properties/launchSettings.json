@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "LumaCompanion.WinUI (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "LumaCompanion.WinUI (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}
